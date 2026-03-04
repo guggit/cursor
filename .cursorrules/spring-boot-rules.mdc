@@ -1,0 +1,524 @@
+---
+description: Reco Framework 开发规范
+alwaysApply: true
+---
+
+# Reco Framework 开发规范
+
+本文档包含 Reco Framework 的完整开发规范，分为代码生成规则和核心API使用指南两部分。
+
+## 基础开发环境
+- 语言: Java 13
+- 构建工具: Gradle 7.6.1
+- 开发框架: Spring Boot 2.7.18
+
+---
+
+# 第一部分：代码生成规则
+
+## 总体约定
+- **目标**：根据 SQL `CREATE TABLE` 生成一整套分层代码：
+  - `Entity + Mapper + Meta(Column/Table) + Mapper.xml + VM`
+  - `Query + Repository + Service + AppService + Controller(webapi/mobileapi)`
+  并与现有风格保持一致。
+- **技术栈**：Entity 使用 **MyBatis-Plus** 注解（仅少量字段填充/逻辑删除），CRUD/映射使用 **MyBatis Dynamic SQL**（`*Column/*Table`），Mapper 同时继承框架通用 Mapper。
+- **交互要求**：生成代码前必须先提示用户**输入或选择包名（base package）与目标模块**，禁止写死为 `cn.bipark.reco.lowcode...`。
+- **包名输入与模块前缀规则（Gradle 模块命名）**：
+  - **输入格式**：用户输入"包名"时允许两种形式：
+    - 仅包名：`package`（不包含 `-`），例如 `lowcode`
+    - 前缀+包名：`prefix-package`（包含 `-`），例如 `reco-lowcode` 或 `acme-lowcode`
+  - **解析规则**：
+    - 若输入包含 `-`：视为用户同时指定了 `prefix` 与 `package`（以第一个 `-` 分割：`prefix` + `package`）
+    - 若输入不包含 `-`：使用默认 `prefix = reco`，`package = 用户输入`
+  - **目标模块名**：必须按 `${prefix}-${package}-(model|domain|web)` 生成/选择模块（例如 `reco-lowcode-model`）
+  - **模块存在性检查**：生成代码前检查当前项目是否已存在 `${prefix}-${package}-model`、`${prefix}-${package}-domain`、`${prefix}-${package}-web` 三个模块：
+    - **若已存在**：跳过模块创建，直接继续生成代码
+    - **若不存在**：参考项目中已有模块（如 `reco-tag-model/domain/web`）创建同结构模块，并在 `settings.gradle` 中 `include` 后再继续生成代码
+- **命名**：
+  - **Java 字段**：统一 **camelCase**；数据库列为 **snake_case**。
+  - **文件命名**：`Xxx.java / XxxMapper.java / XxxColumn.java / XxxTable.java / XxxMapper.xml / XxxVM.java`（Column/Table 位于 meta 目录）
+  - **ViewCode**：VM 的 `getViewCode()` 返回 **表名**（如 `sys_account`）。
+  - **路由命名**：使用两级路由，格式为 `<module>/<resource>`（模块名/资源名），例如 `lowcode/app`（WebApi 和 MobileApi 路由一致）
+  - **前缀剥离（仅 sys_/std_）**：当表名以 `sys_` 或 `std_` 开头时，生成代码的 **领域对象/VM/Query/Repository/Service/事件/Controller** 命名均 **不保留该前缀**。例如 `sys_account` → `Account`（类名）、路由 `<module>/account`（kebab-case）
+- **通用原则**：
+  - **序列化**：Entity 和 VM 分别继承自 `BaseEntity` 和 `BaseMetadataViewModel`，均已实现 `Serializable`，无需重复声明
+  - **依赖注入**：统一使用构造器注入（`@RequiredArgsConstructor`），只注入实际使用的依赖
+
+## 目录/包路径
+- **模块结构**：`${prefix}-${package}-model`、`${prefix}-${package}-domain`、`${prefix}-${package}-web`
+- **模块依赖关系**：
+  - `${prefix}-${package}-domain` 依赖 `${prefix}-${package}-model`（build.gradle 中添加 `api project(':${prefix}-${package}-model')`）
+  - `${prefix}-${package}-web` 依赖 `${prefix}-${package}-domain`（build.gradle 中添加 `api project(':${prefix}-${package}-domain')`）
+- **lombok 配置**：每个模块需要创建 `lombok.config` 文件，内容为 `lombok.addLombokGeneratedAnnotation = true`
+- **默认包结构**：
+  - **model 模块**：`${basePackage}.model.(entity|mapper|meta|viewmodel|query)`
+  - **domain 模块**：`${basePackage}.domain.(repository|service|entity)`
+  - **web 模块**：`${basePackage}.web.(service|webapi|mobileapi)`
+- **默认目录结构**：
+  - **Model 层**：
+    - **Entity**：`${modelModule}/src/main/java/${basePackagePath}/model/entity/`
+    - **Mapper**：`${modelModule}/src/main/java/${basePackagePath}/model/mapper/`（仅 Mapper 接口）
+    - **Meta**：`${modelModule}/src/main/java/${basePackagePath}/model/meta/`（Column/Table，包名 `${basePackage}.model.meta`）
+    - **VM**：`${modelModule}/src/main/java/${basePackagePath}/model/viewmodel/`
+    - **Query**：`${modelModule}/src/main/java/${basePackagePath}/model/query/`
+    - **Message**：`${modelModule}/src/main/java/${basePackagePath}/model/message/`（领域事件）
+    - **XML**：`${modelModule}/src/main/resources/mapper/`
+  - **Domain 层**：
+    - **Repository**：`${domainModule}/src/main/java/${basePackagePath}/domain/repository/`
+    - **Service**：`${domainModule}/src/main/java/${basePackagePath}/domain/service/`
+    - **Aggregate**：`${domainModule}/src/main/java/${basePackagePath}/domain/entity/`（聚合根）
+  - **Web 层**：
+    - **AppService**：`${webModule}/src/main/java/${basePackagePath}/web/service/`
+    - **WebApi**：`${webModule}/src/main/java/${basePackagePath}/web/webapi/`
+    - **MobileApi**：`${webModule}/src/main/java/${basePackagePath}/web/mobileapi/`
+  - 其中 `${basePackagePath}` 为 `basePackage` 的路径形式（例如 `cn.bipark.reco.lowcode` → `cn/bipark/reco/lowcode`）
+
+## 扩展分层代码生成（Query/Repository/Service/AppService/Controller）
+- **说明**：以下各层的目录和包名结构详见"目录/包路径"章节
+- **Query（model 层）**
+  - 基类：`extends BasePagedQuery`，实现 `QueryDSL query()`（参考 `LowcodeAppQuery`）
+  - 约定：支持 `getKey()` 模糊查询、`setOrderBy`/`setId` 链式返回自身类型
+  - 详见"Query 生成规范"章节
+- **Repository（domain 层）**
+  - 基类：`extends BaseDataRepository<Entity, Mapper, Query>`，注解 `@Component`、`@Slf4j`
+- **Service（domain 层）**
+  - 类名：`XxxService`（后缀为 Service，而非 DomainService）
+  - 基类：`extends BaseDomainService`，注解 `@Service`、`@Slf4j`、`@RequiredArgsConstructor`
+  - 依赖注入：需要注入 Repository，如 `private final XxxRepository repository;`
+  - 约定：提供 `get/getAll/getPaged/count/add/modify/remove`（返回 VM 或 PagedList<VM>，内部用 `PageUtils.map`）
+  - 方法签名：`getAll/getPaged/count` 方法接收 Query 对象（而非 QueryDSL）
+- **AppService（web 层）**
+  - 类名：`XxxAppService`
+  - 基类：`extends BaseAppService`，注解 `@Service`、`@Slf4j`、`@RequiredArgsConstructor`
+  - 依赖注入：只注入实际使用的依赖（如 `private final XxxService domainService;`），不使用未使用的字段
+  - 约定：封装领域服务（类名为 `XxxService`）；提供 `get/getAll/getPaged/count/add/modify/remove` 方法；需要落库/缓存时使用 `PageUtils.map(vm, Entity.class)`，删除通过调用 `domainService.remove(ids)` 实现；分页查询可调用 `query.setOrderIfEmpty("id desc")`
+  - **export 方法**：
+    - 方法签名：`public void export(@NonNull DataExportVM config, @NonNull XxxQuery query)`
+    - 实现：调用基类的 `export(config, data)` 方法，传入查询结果数据
+    - 示例：
+      ```java
+      public void export(@NonNull DataExportVM config, @NonNull XxxQuery query) {
+          export(config, this.getAll(query));
+      }
+      ```
+- **Controller（webapi/mobileapi）**
+  - 类名：`XxxController`（webapi 和 mobileapi 类名相同）
+  - 基类：`extends BaseController`
+  - 依赖注入：只注入实际使用的依赖，删除未使用的字段
+  - 注解风格（参考 `TagController`）：
+    - `@RestController("<module>.<resource>")` + `@RequestMapping("<module>/<resource>")`（路由格式见"总体约定"的"路由命名"）
+    - `@Api(tags="...")` + `@Mark({VM.class})` + `@RequiredArgsConstructor`
+    - 条件启用：`@ConditionalOnProperty(prefix="reco.platform.webapi|mobileapi", name="enabled", havingValue="true")`
+  - 约定：
+    - webapi 提供 CRUD（GET/GET paged/GET count/POST/PUT/DELETE + list）
+    - mobileapi 至少提供 GET 与分页 GET
+    - 权限注解：使用 `@PreAuthorize("hasAuthority('MODULE_RESOURCE_ACTION')")` 格式，命名规则为 模块名_资源名_方法名（如 `LOWCODE_APP_ADD`、`LOWCODE_APP_EDIT`、`LOWCODE_APP_DEL`）
+    - 路由前缀剥离规则见"总体约定"的"前缀剥离"
+  - **标准 CRUD 接口**：
+    - **GET**：查询单条记录
+      ```java
+      @GetMapping("{id}")
+      public XxxVM get(@PathVariable Long id)
+      ```
+    - **GET paged**：分页查询
+      ```java
+      @GetMapping("paged")
+      public PagedList<XxxVM> getPaged(XxxQuery query)
+      ```
+    - **GET count**：统计数量
+      ```java
+      @GetMapping("count")
+      public Long count(XxxQuery query)
+      ```
+    - **POST**：新增记录
+      ```java
+      @PreAuthorize("hasAuthority('MODULE_RESOURCE_ADD')")
+      @PostAuthorize("appLog('MODULE', '新增资源', '数据:%s', #vm)")
+      @ApiOperation(value = "新增资源")
+      @PostMapping()
+      public Long post(@Valid @RequestBody XxxVM vm)
+      ```
+    - **PUT**：修改记录
+      ```java
+      @PreAuthorize("hasAuthority('MODULE_RESOURCE_EDIT')")
+      @PostAuthorize("appLog('MODULE', '修改资源', '数据:%s', #vm)")
+      @ApiOperation(value = "修改资源")
+      @PutMapping("{id}")
+      public boolean put(@PathVariable Long id, @Valid @RequestBody XxxVM vm)
+      ```
+    - **DELETE**：删除记录
+      ```java
+      @PreAuthorize("hasAuthority('MODULE_RESOURCE_DEL')")
+      @PostAuthorize("appLog('MODULE', '删除资源', 'ID:%s', #id)")
+      @ApiOperation(value = "删除资源")
+      @DeleteMapping("{id}")
+      public boolean delete(@PathVariable Long id)
+      ```
+    - **list 接口**：不分页查询全部列表
+      ```java
+      @GetMapping("list")
+      public List<XxxVM> getList(XxxQuery query)
+      ```
+    - **batch-delete 接口**：批量删除（使用 PUT 方法）
+      ```java
+      @PutMapping("batch-delete")
+      public boolean deleteAll(@RequestBody Long[] ids)
+      ```
+    - **export 接口**：数据导出功能
+      ```java
+      @PreAuthorize("hasAuthority('MODULE_RESOURCE_EXPORT')")
+      @PostAuthorize("appLog('MODULE', '导出资源', '配置:%s, 参数:%s', #config, #query)")
+      @ApiOperation(value = "导出资源")
+      @PostMapping("export")
+      public void export(@RequestBody DataExportVM config, XxxQuery query)
+      ```
+
+## 主表（聚合根）识别 + 领域事件生成
+- **先判断表类型**：用户给出表结构时，需要分析该表更像"主表（聚合根）"还是"关联表（关系表）"。
+- **关联表（关系表）的典型特征（命中任一项优先判为关联表）**：
+  - 表名明显为关系表：`*_rel`/`*_relation`/`*_map`/`*_mapping`/`*_link`/`*_ref`/`*_bind`
+  - 字段几乎全是 `*_id`/外键 + 少量审计字段（如 `inputer/input_time/is_delete`），缺少业务属性（如 `name/code/status` 等）
+  - 主键为联合主键，或没有独立业务主键语义
+- **主表（聚合根）的典型特征**：
+  - 有明确业务语义字段（如 `name/code/status/type` 等），且对应 VM/Controller 具备独立 CRUD
+  - 会被其它表引用（外键/`*_id` 指向它），或作为业务入口对象
+
+### 当判定为主表（聚合根）时，必须额外生成
+- **聚合根（domain 层）**
+  - 目录：`${domainModule}/src/main/java/${basePackagePath}/domain/entity/`
+  - 包名：`${basePackage}.domain.entity`
+  - 命名：`XxxEntity`
+  - 基类：`extends BaseAggregate<Xxx>`
+  - 注解/Scope：`@Component` + `@Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)` + `@Data` + `@EqualsAndHashCode(callSuper = true)`
+  - 方法约定（至少 3 个）：`notifyXxxCreated/notifyXxxUpdated/notifyXxxDeleted`
+  - 方法实现：调用 `publish(new XxxCreatedEvent(getData()))`（Updated/Deleted 同理）
+- **领域事件（model 层）**
+  - 目录：`${modelModule}/src/main/java/${basePackagePath}/model/message/`
+  - 包名：`${basePackage}.model.message`
+  - 命名：`XxxCreatedEvent / XxxUpdatedEvent / XxxDeletedEvent`
+  - 基类：`extends PersistentEvent<Xxx>`，导入路径为 `cn.bipark.reco.core.model.message.PersistentEvent`
+  - 构造函数：`super(data)`
+- **Service 必须触发事件**
+  - `add(vm)`：落库成功后 `actAs(entity, XxxEntity.class).notifyXxxCreated()`
+  - `modify(vm)`：修改成功后 `actAs(entity, XxxEntity.class).notifyXxxUpdated()`
+  - `remove(ids...)`：删除前先 `repository.getAll(ids)`，删除成功后对原数据逐条 `notifyXxxDeleted()`
+
+## Entity 生成规范（MyBatis-Plus 风格）
+- **基类**：`extends BaseEntity`。
+- **注解**：`@Data`、`@ApiModel("中文名")`、`@EqualsAndHashCode(callSuper = true)`。
+- **id 字段**：必须显式声明 `@TableId private Long id;`，即使继承了 BaseEntity
+- **字段注解**：
+  - `inputer/inputerId/inputTime`：`@TableField(fill = FieldFill.INSERT)`
+  - `isDelete`：`@TableField(fill = FieldFill.UPDATE) + @TableLogic`
+- **字段类型映射（常用）**：
+  - `bigint` → `Long`
+  - `int` → `Integer`
+  - `varchar/mediumtext` → `String`
+  - `bit(1)` → `Boolean`
+  - `datetime` → `Date`
+  - `decimal(p,s)` → `BigDecimal`
+
+## Mapper 生成规范
+- **接口**：`XxxMapper`
+- **继承**：`extends XxxTable, DataMapper<Xxx>`（不重复再继承 `BaseMapper`，如已被 `DataMapper` 覆盖）
+- **导入**：需要导入 `import ${basePackage}.model.meta.XxxTable;`
+- **注解**：`@Mapper`
+
+## Meta（Dynamic SQL）生成规范
+- **包和目录**：`${basePackage}.model.meta`，`${modelModule}/src/main/java/${basePackagePath}/model/meta/`
+- **`XxxColumn`**：
+  - 结构：外层 `public final class XxxColumn` + 内部 `public static final class Xxx extends SqlTable`
+  - 审计/删除：在内部 `SqlTable` 上添加 `@InputAudited`、`@SoftDelete`（如表同时存在更新审计字段则加 `@UpdateAudited`）
+  - **JDBCType**：按字段类型选择（示例：`BIT/DECIMAL/TIMESTAMP/LONGNVARCHAR`）
+  - **delimiterOf**：仅在列名可能是保留字或需转义时使用（项目已有用法：`delimiterOf("name")`、`delimiterOf("status")`、`delimiterOf("sequence")` 等）
+- **`XxxTable`**：
+  - `extends GeneralMapper<Xxx>`
+  - 定义 `BasicColumn[] selectList = columnList(...)`
+  - 提供 `@Results(id="XxxResult", ...)` + `@ResultMap("XxxResult")`
+  - 提供默认 CRUD（`count/delete/insert/insertSelective/select/update`）并实现 `getDefinition()` 返回 `XxxColumn.xxx` 表定义对象
+
+### 审计功能详解
+- **审计字段定义**：审计字段由框架通过注解自动管理，定义在 `cn.bipark.reco.core.constant.SysFieldConsts` 中
+- **支持的审计注解**：
+  - `@InputAudited` - 录入审计（inputer、inputerId、inputTime），插入时自动填充
+  - `@UpdateAudited` - 更新审计（updater、updaterId、updateTime），更新时自动填充
+  - `@DeleteAudited` - 删除审计（deleter、deleterId、deleteTime），逻辑删除时自动填充
+  - `@SoftDelete` - 逻辑删除（isDelete），删除时自动设置，查询时自动过滤
+  - `@UnitAudited` - 单位审计（unitId），插入时自动填充
+  - `@DeptAudited` - 部门审计（deptId），插入时自动填充
+  - `@ParkAudited` - 园区审计（parkId），插入时自动填充
+  - `@CatalogueAudited` - 目录审计（catalogueId、catalogueKey），插入/更新时自动计算
+  - `@UnitCatalogueAudited` - 单位目录审计（unitId、catalogueId、catalogueKey），catalogueKey = unitId:catalogueId
+  - `@ParkCatalogueAudited` - 园区目录审计（parkId、catalogueId、catalogueKey），catalogueKey = parkId:catalogueId
+
+### 审计注解使用示例
+- 在 Meta 的 `XxxColumn` 内部类的构造函数上添加审计注解：
+  ```java
+  @InputAudited
+  @UpdateAudited
+  @SoftDelete
+  @UnitAudited
+  @DeptAudited
+  public Xxx() {
+      super("table_name", XxxAlias.xxx);
+  }
+  ```
+
+## Mapper XML 生成规范
+- 文件：`XxxMapper.xml`
+- namespace：`${basePackage}.model.mapper.XxxMapper`
+- 默认可为空（与 `LowcodeAppMapper.xml` 一致），后续自定义 SQL 再补充
+
+## VM（ViewModel）生成规范
+- **基类**：`extends BaseMetadataViewModel`。
+- **注解**：`@Data`、`@ApiModel("中文名")`、`@EqualsAndHashCode(callSuper = true)`、字段 `@ApiModelProperty`。
+- **校验**：常用 `@Size(max=...)`；必填按业务再加 `@NotNull/@NotBlank/@NotEmpty`。
+- **必须实现**：`public String getViewCode()` 返回表名（如 `sys_account`）。
+
+### 数据脱敏
+- **注解位置**：在需要脱敏的字段上添加 `@Sensitive` 注解（导入路径：`cn.bipark.reco.core.annotation.Sensitive`）
+- **支持的数据类型**（SensitiveTypeEnum 枚举）：`DEFAULT`、`TEL`、`MOBILE`、`EMAIL`、`ID_CARD`、`CHINESE_NAME`、`BANK_CARD`、`ADDRESS`
+- **使用示例**：
+  ```java
+  @ApiModelProperty("手机号码")
+  @Pattern(regexp = "^(1\\d{10})?$", message = "手机号码格式不正确")
+  @Sensitive(SensitiveTypeEnum.MOBILE)
+  private String mobile;
+  ```
+- **注意事项**：用于 ViewModel 层，自动脱敏处理，可与校验注解配合使用
+
+## Controller 操作日志规范
+- **操作日志注解**：在 Controller 方法上使用 `@PostAuthorize("appLog(...)")` 记录操作日志
+- **使用场景**：ADD/EDIT/DEL/EXPORT 操作需要记录日志
+- **日志格式**：`appLog('模块名', '操作描述', '参数格式', #参数)`
+- **示例**：
+  ```java
+  @PreAuthorize("hasAuthority('MODULE_RESOURCE_ADD')")
+  @PostAuthorize("appLog('MODULE', '新增资源', '数据:%s', #vm)")
+  @ApiOperation(value = "新增资源")
+  @PostMapping()
+  public Long post(@Valid @RequestBody XxxVM vm)
+  ```
+- **权限注解搭配**：`@PreAuthorize` 用于权限控制，`@PostAuthorize` 用于日志记录
+
+## 业务异常与错误码规范
+- **自定义业务异常类**：
+  - 位置：`${modelModule}/src/main/java/${basePackagePath}/model/exception/`
+  - 类名：`XxxAppException`，继承自 `AppException`
+  - 提供多个构造函数，支持直接传消息或配合 `ErrorCodeEnum` 使用
+- **错误码枚举（ErrorCodeEnum）**：
+  - 位置：`${modelModule}/src/main/java/${basePackagePath}/model/constant/`
+  - 注解：`@Getter` + `@RequiredArgsConstructor`
+  - 定义模块级别的错误码和描述
+- **使用方式**：在 Service 中抛出异常，如 `throw new XxxAppException(ErrorCodeEnum.NO_DATA)`
+
+## 枚举常量定义规范
+- **业务常量类（Consts）**：
+  - 位置：`${modelModule}/src/main/java/${basePackagePath}/model/constant/`
+  - 命名：`XxxConsts`
+  - 特征：抽象类 + 私有构造器，防止实例化
+- **业务枚举类**：
+  - 位置：`${modelModule}/src/main/java/${basePackagePath}/model/constant/`
+  - 实现 `BiEnumDesc` 接口以支持序列化/反序列化
+  - 注解：`@Getter` + `@RequiredArgsConstructor` + `@JsonCreator`（用于反序列化）
+
+## Query 生成规范
+- **基类**：`extends BasePagedQuery`，实现 `QueryDSL query()` 方法
+- **QueryDSL 创建**：使用 `QueryDSL.of(XxxTable.xxx)` 创建查询对象
+- **QueryDSL 常用条件方法**：
+  - `ifEqual/ifNotEqual` - 相等/不等
+  - `ifGreaterThan/ifGreaterThanOrEqual/ifLessThan/ifLessThanOrEqual` - 比较
+  - `ifLike/ifNotLike` - 模糊查询
+  - `ifIn/ifNotIn` - 包含/不包含
+  - `ifIsNull/ifIsNotNull` - NULL 判断
+  - `ifGreaterThanOrEqual/ifLessThanOrEqual` - 日期范围
+- **QueryDSL 编译方法**：`build()` - 编译查询语句
+- **Query 字段扩展（时间范围）**：
+  - 字段命名：`begin` + 字段名、`end` + 字段名（如 `beginStartTime`/`endStartTime`）
+  - 使用 `ifGreaterThanOrEqual` 和 `ifLessThanOrEqual` 方法
+- **约定**：支持 `getKey()` 模糊查询、`setOrderBy`/`setId` 链式返回自身类型
+
+## 配置类规范
+- **位置**：`${domainModule}/src/main/java/${basePackagePath}/domain/config/`
+- **包名**：`${basePackage}.domain.config`
+- **命名**：`XxxConfig`（模块名 + Config）
+- **类注解**：`@Data`、`@Component`、`@ConfigurationGroup`（指定 value 和 autoload）、`@RefreshScope`、`@Lazy`
+- **属性映射**：使用 `@JsonProperty` 注解将配置属性映射到配置文件中的键，属性名使用 camelCase，配置键使用大写下划线格式
+
+## 本地编译校验
+- **Windows 推荐命令**：`./gradlew.bat :${prefix}-${package}-model:compileJava :${prefix}-${package}-domain:compileJava :${prefix}-${package}-web:compileJava`
+- **Linux/Mac 推荐命令**：`./gradlew :${prefix}-${package}-model:compileJava :${prefix}-${package}-domain:compileJava :${prefix}-${package}-web:compileJava`
+- **说明**：将 `${prefix}` 和 `${package}` 替换为实际的模块前缀和包名（例如 `reco-lowcode` 对应 `:reco-lowcode-model:compileJava :reco-lowcode-domain:compileJava :reco-lowcode-web:compileJava`）
+
+---
+
+# 第二部分：Reco Framework 核心API使用指南
+
+## 常用工具类
+
+### ALUtils
+- **位置**：`cn.bipark.reco.core.util.ALUtils`
+- **类型转换方法**：
+  - `toLong(Object/String)` - 转换为 Long（返回 null）
+  - `toLong0(String)` - 转换为 long（返回 0）
+  - `toInt(Object/String)` - 转换为 Integer（返回 null）
+  - `toInt0(String)` - 转换为 int（返回 0）
+  - `toDecimal(Object/String)` - 转换为 BigDecimal（返回 null）
+  - `toDecimal0(String)` - 转换为 BigDecimal（返回 0）
+  - `toDate(Object/String/LocalDateTime/LocalDate)` - 转换为 Date
+  - `toLocalDate(Date)` - 转换为 LocalDate
+  - `toLocalTime(Date)` - 转换为 LocalTime
+  - `toLocalDateTime(Date)` - 转换为 LocalDateTime
+  - `toBoolean(Object/String)` - 转换为 Boolean
+  - `toString(Object, String format)` - 转换为 String（支持格式化）
+- **字符串分割方法**：
+  - `splitToDecimal(String)` - 逗号分隔转为 BigDecimal 数组
+  - `splitToLong(String)` - 逗号分隔转为 Long 数组
+  - `splitToInt(String)` - 逗号分隔转为 Integer 数组
+- **验证方法**：
+  - `isMobile(String)` - 验证手机号（中国手机号）
+  - `isEmail(String)` - 验证邮箱格式
+- **安全获取方法**：
+  - `tryGet(T value, T defaultValue)` - 值为空返回默认值
+  - `tryGet(T value, Supplier<T> defaultValue)` - 值为空调用默认值提供者
+  - `tryGet(T value, Function<T, R> access)` - 安全访问对象属性
+  - `tryGet(T value, Function<T, R> access, Supplier<R> defaultValue)` - 安全访问对象属性并提供默认值
+- **属性操作方法**：
+  - `getProperty(Object bean, String name)` - 获取对象属性
+  - `setProperty(Object bean, String name, Object value)` - 设置对象属性
+  - `getNestedProperty(Object bean, String name)` - 链式获取对象属性
+  - `setNestedProperty(Object bean, String name, Object value)` - 链式设置对象属性
+- **反射工具方法**：
+  - `getSuperClassGenericType(Class<?> tClass, int index)` - 获取泛型基类参数
+  - `getFieldGenericType(Field tField, int index)` - 获取字段泛型参数
+- **其他方法**：
+  - `convertTo(Object source, Class<T> targetType)` - 通用类型转换
+  - `getUIDShort()` - 获取全球唯一短码（十六进制）
+  - `isEmpty(Object obj)` - 判断对象是否为空
+  - `isNotEmpty(Object obj)` - 判断对象是否不为空
+
+### HttpUtils
+- **位置**：`cn.bipark.reco.core.util.HttpUtils`
+- **实例获取**：
+  - `instance()` - 获取 HttpUtils 单例
+- **GET 请求方法**：
+  - `get(String url, Map<String, ?> urlParams)` - 执行 GET 请求
+  - `get(String url, Map<String, ?> urlParams, Class<T> responseType)` - 执行 GET 请求并转换结果
+- **POST 请求方法**：
+  - `postJson(String url, Map<String, ?> urlParams, Object body)` - 执行 POST JSON 请求
+  - `postJson(String url, Map<String, ?> urlParams, Object body, Class<T> responseType)` - 执行 POST JSON 请求并转换结果
+  - `postForm(String url, Map<String, ?> urlParams, Map<String, Object> formParams)` - 执行 POST 表单请求
+  - `postForm(String url, Map<String, ?> urlParams, Map<String, Object> formParams, Class<T> responseType)` - 执行 POST 表单请求并转换结果
+- **配置方法**：
+  - `setRequestCharset(String requestCharset)` - 设置请求编码
+  - `setResponseCharset(String responseCharset)` - 设置响应编码
+  - `addHeader(String key, String value)` - 添加 HTTP 头
+- **HttpResult 常用方法**：
+  - `getStatus()` - 获取 HTTP 状态码
+  - `isSuccess()` - 判断是否返回 HTTP 200
+  - `getContent()` - 获取响应内容（String）
+  - `getContent(Class<T> tClass)` - 获取响应内容（转换类型）
+
+### UserUtils
+- **位置**：`cn.bipark.reco.core.runtime.user.UserUtils`
+- **常用方法**：
+  - `getUserId()` - 获取用户编号
+  - `getUnitId()` - 获取用户单位
+  - `getParkId()` - 获取用户园区
+  - `getLoginTime()` - 获取登录时间
+  - `getLoginName()` - 获取登录名
+  - `getUserName()` - 获取用户名
+  - `getNickName()` - 获取昵称
+  - `getRealName()` - 获取真实姓名
+  - `getMobile()` - 获取手机号码
+  - `getEmail()` - 获取电子邮箱
+  - `getRoles()` - 获取当前用户全部角色
+  - `getRoleIds()` - 获取当前用户全部角色编号
+  - `getDeptIds()` - 获取当前用户全部部门编号
+  - `getStrategies()` - 获取当前用户全部策略
+  - `getName()` - 获取显示名称
+  - `IsInRole(String roleCode)` - 判断当前用户是否属于指定角色
+  - `IsInStrategy(String strategyCode)` - 判断当前用户是否属于指定策略
+  - `getDirectUnitId()` - 获取用户直属单位
+  - `getDirectDeptId()` - 获取用户直属部门
+  - `getCurrentUnitDeptIds()` - 获取用户当前单位入职部门
+  - `getDirectUnitDeptIds()` - 获取用户直属单位入职部门
+- **会话管理**：
+  - `getPrincipal()` - 获取当前用户会话
+  - `setPrincipal(PrincipalService principal)` - 设置当前用户会话（使用完毕后需释放）
+  - `getPrincipalBuilder()` - 获取当前用户会话构建器
+
+### PageUtils
+- **位置**：`cn.bipark.reco.core.util.PageUtils`
+- **分页查询方法**：
+  - `toPagedList(Enumerable<T> query, PagedQuery page)` - Enumerable 分页查询
+  - `toPagedList(Enumerable<S> query, PagedQuery page, Function<S, T> convert)` - Enumerable 分页查询带转换
+  - `toPagedList(Enumerable<S> query, PagedQuery page, Class<T> tClass)` - Enumerable 分页查询转类
+  - `toPagedList(ISelect query, PagedQuery page)` - ISelect 分页查询
+  - `toPagedList(ISelect query, PagedQuery page, Function<S, T> convert)` - ISelect 分页查询带转换
+  - `toPagedList(ISelect query, PagedQuery page, Class<T> tClass)` - ISelect 分页查询转类
+  - `count(ISelect query)` - 统计数量
+- **对象映射方法**：
+  - `map(S source, Class<T> tClass)` - 单个对象映射
+  - `map(S source, Class<T> tClass, String... ignoreProperties)` - 单个对象映射（忽略属性）
+  - `map(S source, T target)` - 对象映射到目标对象
+  - `map(S[] source, Class<T> tClass)` - 数组映射
+  - `map(List<S> source, Class<T> tClass)` - 列表映射
+  - `map(List<S> source, Function<S, T> convert)` - 列表函数转换
+  - `map(PagedList<S> source, Class<T> tClass)` - 分页列表映射
+- **树形结构方法**：
+  - `toTree(List<S> source, Function<S, String> titleSelector)` - 树形映射
+  - `toTree(List<S> source, Function<S, String> titleSelector, Function<S, String> keySelector)` - 树形映射（自定义键）
+- **其他方法**：
+  - `set(PagedList<S> source, BiConsumer<S, List<T>> setter, List<T> items, Function<T, Long> getter)` - 设置扩展属性
+
+### CacheUtils
+- **位置**：`cn.bipark.reco.core.util.CacheUtils`
+- **缓存组方法**：
+  - `getCacheGroup(String name)` - 获取指定名称的缓存组
+  - `cacheGroup(Function<K, CacheValueWrap<V>> loader)` - 创建缓存组（自定义加载器）
+  - `cacheGroup(String name, Function<K, V> valueLoader, long expire)` - 创建缓存组
+- **缓存值包装方法**：
+  - `getValueWrap(String name, Serializable key, long expire)` - 获取缓存值包装
+  - `getValueWrap(String name, Serializable key, Callable<T> valueLoader, long expire)` - 获取缓存值包装（带加载器）
+  - `getValueWrap(String name, Serializable key, Callable<T> initValueLoader, Callable<T> valueLoader, long expire)` - 获取缓存值包装（带初始化和加载器）
+  - `put(String name, Serializable key, T value, long expire)` - 放入缓存
+- **CacheValueWrap 常用方法**：
+  - `get()` - 获取缓存值
+  - `get(Callable<T> valueLoader)` - 获取缓存值（带加载器）
+  - `put(Serializable value)` - 设置缓存值
+  - `putIfAbsent(T value)` - 如果不存在则设置
+  - `evict()` - 清除缓存
+  - `evictIfPresent()` - 如果存在则清除
+  - `renew(long second)` - 续期（延长过期时间）
+  - `verify()` - 验证缓存是否有效
+  - `setExpire(long expire)` - 设置过期时间
+- **CacheGroup 常用方法**：
+  - `get(K key)` - 获取缓存值
+  - `put(K key, V value)` - 设置缓存值
+  - `putIfAbsent(K key, V value)` - 如果不存在则设置
+  - `evict(K key)` - 清除缓存
+  - `evictIfPresent(K key)` - 如果存在则清除
+  - `renew(K key, long second)` - 续期
+  - `verify(K key)` - 验证缓存是否有效
+
+## 常用常量
+
+### SysFieldConsts
+- **位置**：`cn.bipark.reco.core.constant.SysFieldConsts`
+- **常用字段**：`ID`、`INPUTER`、`INPUT_TIME`、`INPUTER_ID`、`UPDATER`、`UPDATE_TIME`、`UPDATER_ID`、`IS_DELETE`、`DELETER`、`DELETE_TIME`、`DELETER_ID`、`UNIT_ID`、`DEPT_ID`、`PARK_ID`、`CATALOGUE_ID`、`CATALOGUE_KEY`
+
+### StringConsts
+- **位置**：`cn.bipark.reco.core.constant.StringConsts`
+- **常用字符串**：`EMPTY`、`PERCENT`、`COMMA`、`SPACE` 等
+
+## 值对象（ValueObject）
+
+### 常用值对象
+- **位置**：`cn.bipark.reco.core.model.valueobject`
+- **常用类**：
+  - `PagedList<T>` - 分页列表
+  - `NameCodeItem` - 名称代码项
+  - `KeyValuePair<K, V>` - 键值对
+  - `CacheValue<T>` - 缓存值
+  - `BindTableItem` - 绑定表项
